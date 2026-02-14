@@ -42,6 +42,7 @@
     // ── Audio ──
     // Single AudioContext, created once on first user gesture, never closed.
     var audioCtx = null;
+    var audioWatchdog = null; // interval that keeps AudioContext alive
 
     function ensureAudioContext() {
         if (!audioCtx) {
@@ -51,6 +52,25 @@
             audioCtx.resume();
         }
         return audioCtx;
+    }
+
+    // Watchdog: iOS sometimes suspends the AudioContext even while the page
+    // is in the foreground. This interval checks every 3 seconds and resumes
+    // it if needed, keeping the pre-scheduled bells alive.
+    function startAudioWatchdog() {
+        stopAudioWatchdog();
+        audioWatchdog = setInterval(function() {
+            if (audioCtx && audioCtx.state === "suspended") {
+                audioCtx.resume();
+            }
+        }, 3000);
+    }
+
+    function stopAudioWatchdog() {
+        if (audioWatchdog) {
+            clearInterval(audioWatchdog);
+            audioWatchdog = null;
+        }
     }
 
     /* ============================================
@@ -223,7 +243,10 @@
         ];
         bellFired = [true, false, false, false];
 
-        // 5. Update UI
+        // 5. Start watchdog to keep AudioContext alive
+        startAudioWatchdog();
+
+        // 6. Update UI
         state = "running";
         currentPhase = "";
         playButton.classList.remove("breathing");
@@ -240,6 +263,7 @@
         state = "idle";
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
+        stopAudioWatchdog();
 
         // Don't close the AudioContext — just let scheduled sounds finish
         // or they'll be cut off. Closing and recreating causes iOS issues.
