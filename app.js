@@ -42,22 +42,59 @@
     // ── Audio ──
     var audioCtx = null;
 
-    // Hidden <audio> element for iOS audio session unlock
-    var silentAudio = null;
-    try {
-        silentAudio = document.createElement("audio");
-        silentAudio.setAttribute("x-webkit-airplay", "deny");
-        silentAudio.preload = "auto";
-        silentAudio.src = "silence.wav";
-        silentAudio.style.display = "none";
-        document.body.appendChild(silentAudio);
-    } catch (e) { /* ignore */ }
+    // Hidden <audio> element that plays a silent track for the full session.
+    // iOS keeps <audio> elements alive even when the screen locks (like music).
+    // This keeps the AudioContext timeline running so our scheduled bells fire.
+    var keepAliveAudio = document.createElement("audio");
+    keepAliveAudio.setAttribute("x-webkit-airplay", "deny");
+    keepAliveAudio.style.display = "none";
+    document.body.appendChild(keepAliveAudio);
 
     function getOrCreateAudioContext() {
         if (!audioCtx) {
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         }
         return audioCtx;
+    }
+
+    /**
+     * Generate a silent WAV blob URL of the given duration in seconds.
+     * This is a valid audio file that iOS will happily play in the background,
+     * keeping the audio session alive for our Web Audio API bells.
+     */
+    function createSilentWavUrl(durationSeconds) {
+        var sampleRate = 22050; // low rate to keep file small
+        var numSamples = Math.ceil(sampleRate * durationSeconds);
+        var dataSize = numSamples * 2; // 16-bit mono = 2 bytes per sample
+        var fileSize = 44 + dataSize;  // 44-byte WAV header + data
+
+        var buffer = new ArrayBuffer(fileSize);
+        var view = new DataView(buffer);
+
+        // WAV header
+        writeString(view, 0, "RIFF");
+        view.setUint32(4, fileSize - 8, true);
+        writeString(view, 8, "WAVE");
+        writeString(view, 12, "fmt ");
+        view.setUint32(16, 16, true);           // chunk size
+        view.setUint16(20, 1, true);            // PCM format
+        view.setUint16(22, 1, true);            // mono
+        view.setUint32(24, sampleRate, true);   // sample rate
+        view.setUint32(28, sampleRate * 2, true); // byte rate
+        view.setUint16(32, 2, true);            // block align
+        view.setUint16(34, 16, true);           // bits per sample
+        writeString(view, 36, "data");
+        view.setUint32(40, dataSize, true);
+        // Data is all zeros (silence) — ArrayBuffer is zero-initialized
+
+        var blob = new Blob([buffer], { type: "audio/wav" });
+        return URL.createObjectURL(blob);
+    }
+
+    function writeString(view, offset, str) {
+        for (var i = 0; i < str.length; i++) {
+            view.setUint8(offset + i, str.charCodeAt(i));
+        }
     }
 
     /* ============================================
@@ -194,19 +231,7 @@
             stopSession();
         }
 
-        // 1. Unlock iOS audio (must be synchronous in gesture handler)
-        if (silentAudio) {
-            try {
-                var p = silentAudio.play();
-                if (p && p.then) {
-                    p.then(function() {
-                        setTimeout(function() { silentAudio.pause(); }, 250);
-                    }).catch(function() {});
-                }
-            } catch (e) { /* ignore */ }
-        }
-
-        // 2. Create/resume audio context
+        // 1. Create/resume audio context
         var ctx = getOrCreateAudioContext();
         if (ctx.state === "suspended") { ctx.resume(); }
 
@@ -236,7 +261,21 @@
             scheduleBowlSound(ctx, bell4);
         } catch (e) { /* ignore */ }
 
-        // 5. Build phase timeline using wall-clock timestamps for the UI
+        // 5. Start a silent <audio> track for the full session duration.
+        //    iOS keeps <audio> alive when the screen locks, which in turn
+        //    keeps our AudioContext timeline running so the bells fire on time.
+        var totalSeconds = settleSeconds + meditateSeconds + emergeSeconds + 10; // +10s buffer
+        try {
+            // Revoke any previous blob URL
+            if (keepAliveAudio._blobUrl) { URL.revokeObjectURL(keepAliveAudio._blobUrl); }
+            var wavUrl = createSilentWavUrl(totalSeconds);
+            keepAliveAudio._blobUrl = wavUrl;
+            keepAliveAudio.src = wavUrl;
+            var playPromise = keepAliveAudio.play();
+            if (playPromise && playPromise.catch) { playPromise.catch(function() {}); }
+        } catch (e) { /* ignore — bells still work, just may not survive screen lock */ }
+
+        // 6. Build phase timeline using wall-clock timestamps for the UI
         var wallNow = Date.now();
         phases = [
             { name: "settle",   start: wallNow,                                          end: wallNow + settleSeconds * 1000 },
@@ -271,6 +310,16 @@
         state = "idle";
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
+
+        // Stop the keep-alive audio track
+        try {
+            keepAliveAudio.pause();
+            keepAliveAudio.removeAttribute("src");
+            if (keepAliveAudio._blobUrl) {
+                URL.revokeObjectURL(keepAliveAudio._blobUrl);
+                keepAliveAudio._blobUrl = null;
+            }
+        } catch (e) { /* ignore */ }
 
         // Stop all scheduled audio by closing and discarding the context
         if (audioCtx) {
@@ -432,13 +481,13 @@
     closeSettingsBtn.addEventListener("click", closeSettingsPanel);
 
     previewSound.addEventListener("click", function() {
-        // Unlock + play immediately
-        if (silentAudio) {
-            try {
-                var p = silentAudio.play();
-                if (p && p.then) { p.then(function() { setTimeout(function() { silentAudio.pause(); }, 250); }).catch(function(){}); }
-            } catch (e) {}
-        }
+        // Play a short silent wav to unlock iOS audio session, then play bowl
+        try {
+            var url = createSilentWavUrl(1);
+            keepAliveAudio.src = url;
+            var p = keepAliveAudio.play();
+            if (p && p.then) { p.then(function() { setTimeout(function() { keepAliveAudio.pause(); URL.revokeObjectURL(url); }, 500); }).catch(function(){}); }
+        } catch (e) {}
         var ctx = getOrCreateAudioContext();
         if (ctx.state === "suspended") { ctx.resume(); }
         try { scheduleBowlSound(ctx, ctx.currentTime); } catch (e) {}
