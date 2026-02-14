@@ -231,49 +231,42 @@
             stopSession();
         }
 
-        // 1. Create/resume audio context
-        var ctx = getOrCreateAudioContext();
-        if (ctx.state === "suspended") { ctx.resume(); }
-
-        // 3. Calculate the timeline
+        // 1. Calculate durations
         var settleSeconds  = durations.settle * 60;
         var meditateSeconds = durations.meditate * 60;
         var emergeSeconds  = durations.emerge * 60;
+        var totalSeconds = settleSeconds + meditateSeconds + emergeSeconds + 10;
 
-        var now = ctx.currentTime;
-        //
-        // Timeline (in AudioContext seconds from `now`):
-        //   0s          — bell 1 (start settling)
-        //   settle      — bell 2 (start meditating)
-        //   settle+med  — bell 3 (start emerging)
-        //   settle+med+emerge — bell 4 (complete)
-        //
-        var bell1 = now;
-        var bell2 = now + settleSeconds;
-        var bell3 = now + settleSeconds + meditateSeconds;
-        var bell4 = now + settleSeconds + meditateSeconds + emergeSeconds;
-
-        // 4. Schedule ALL four bells right now (from user gesture context)
+        // 2. Start the silent keep-alive <audio> FIRST.
+        //    This must happen before AudioContext usage — on iOS, the <audio>
+        //    element establishes the audio session that allows Web Audio to play.
+        //    It also keeps audio alive when the screen locks.
         try {
-            scheduleBowlSound(ctx, bell1);
-            scheduleBowlSound(ctx, bell2);
-            scheduleBowlSound(ctx, bell3);
-            scheduleBowlSound(ctx, bell4);
-        } catch (e) { /* ignore */ }
-
-        // 5. Start a silent <audio> track for the full session duration.
-        //    iOS keeps <audio> alive when the screen locks, which in turn
-        //    keeps our AudioContext timeline running so the bells fire on time.
-        var totalSeconds = settleSeconds + meditateSeconds + emergeSeconds + 10; // +10s buffer
-        try {
-            // Revoke any previous blob URL
             if (keepAliveAudio._blobUrl) { URL.revokeObjectURL(keepAliveAudio._blobUrl); }
             var wavUrl = createSilentWavUrl(totalSeconds);
             keepAliveAudio._blobUrl = wavUrl;
             keepAliveAudio.src = wavUrl;
             var playPromise = keepAliveAudio.play();
             if (playPromise && playPromise.catch) { playPromise.catch(function() {}); }
-        } catch (e) { /* ignore — bells still work, just may not survive screen lock */ }
+        } catch (e) { /* ignore */ }
+
+        // 3. Create/resume audio context (after <audio> has started)
+        var ctx = getOrCreateAudioContext();
+        if (ctx.state === "suspended") { ctx.resume(); }
+
+        // 4. Schedule ALL four bells on the AudioContext timeline
+        var now = ctx.currentTime;
+        var bell1 = now;
+        var bell2 = now + settleSeconds;
+        var bell3 = now + settleSeconds + meditateSeconds;
+        var bell4 = now + settleSeconds + meditateSeconds + emergeSeconds;
+
+        try {
+            scheduleBowlSound(ctx, bell1);
+            scheduleBowlSound(ctx, bell2);
+            scheduleBowlSound(ctx, bell3);
+            scheduleBowlSound(ctx, bell4);
+        } catch (e) { /* ignore */ }
 
         // 6. Build phase timeline using wall-clock timestamps for the UI
         var wallNow = Date.now();
@@ -481,13 +474,16 @@
     closeSettingsBtn.addEventListener("click", closeSettingsPanel);
 
     previewSound.addEventListener("click", function() {
-        // Play a short silent wav to unlock iOS audio session, then play bowl
+        // 1. Start silent <audio> to unlock iOS audio session
         try {
-            var url = createSilentWavUrl(1);
+            if (keepAliveAudio._blobUrl) { URL.revokeObjectURL(keepAliveAudio._blobUrl); }
+            var url = createSilentWavUrl(8);
+            keepAliveAudio._blobUrl = url;
             keepAliveAudio.src = url;
             var p = keepAliveAudio.play();
-            if (p && p.then) { p.then(function() { setTimeout(function() { keepAliveAudio.pause(); URL.revokeObjectURL(url); }, 500); }).catch(function(){}); }
+            if (p && p.then) { p.catch(function(){}); }
         } catch (e) {}
+        // 2. Then play bowl sound through Web Audio
         var ctx = getOrCreateAudioContext();
         if (ctx.state === "suspended") { ctx.resume(); }
         try { scheduleBowlSound(ctx, ctx.currentTime); } catch (e) {}
