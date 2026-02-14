@@ -56,7 +56,7 @@
     var heartbeat = document.createElement("audio");
     heartbeat.preload = "auto";
     heartbeat.loop = true;
-    heartbeat.src = "bowl.wav";
+    heartbeat.src = "silence.wav";
     heartbeat.volume = 0.01; // near-silent but not zero (iOS may skip zero-volume)
     heartbeat.style.display = "none";
     document.body.appendChild(heartbeat);
