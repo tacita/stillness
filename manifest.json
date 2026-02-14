@@ -2,7 +2,7 @@
     "name": "Stillness",
     "short_name": "Stillness",
     "description": "A simple, beautiful meditation timer",
-    "start_url": "/",
+    "start_url": ".",
     "display": "standalone",
     "background_color": "#0a0a1a",
     "theme_color": "#0a0a1a",
