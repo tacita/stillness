@@ -1,0 +1,480 @@
+/* ============================================
+   Stillness — Meditation Timer
+   Zero dependencies, pure CSS
+   ============================================ */
+
+:root {
+    --bg-deep: #0a0a1a;
+    --bg-surface: #12122a;
+    --bg-elevated: #1a1a3a;
+    --text-primary: #e8e4f0;
+    --text-secondary: #8a86a0;
+    --text-dim: #5a5670;
+    --accent: #7c6faa;
+    --accent-glow: #9d8fd4;
+    --accent-soft: rgba(124, 111, 170, 0.15);
+    --ring-track: rgba(124, 111, 170, 0.1);
+    --ring-fill: #9d8fd4;
+    --settle-color: #6fa0aa;
+    --meditate-color: #7c6faa;
+    --emerge-color: #aa8f6f;
+    --success: #6faa7c;
+    --radius: 16px;
+    --radius-sm: 10px;
+    --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', system-ui, sans-serif;
+    background: var(--bg-deep);
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Safe area for notched iPhones */
+#app {
+    width: 100%;
+    height: 100%;
+    max-width: 430px;
+    position: relative;
+    overflow: hidden;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* ============================================
+   Screens
+   ============================================ */
+
+.screen {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 20px 24px;
+    padding-top: calc(20px + env(safe-area-inset-top));
+    padding-bottom: calc(20px + env(safe-area-inset-bottom));
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(20px);
+    transition: opacity var(--transition), transform var(--transition);
+}
+
+.screen.active {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+/* ============================================
+   Main Screen Layout
+   ============================================ */
+
+.top-area {
+    text-align: center;
+    padding-top: 16px;
+    flex-shrink: 0;
+}
+
+.app-title {
+    font-size: 1.4rem;
+    font-weight: 300;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+
+.subtitle {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    font-weight: 400;
+    min-height: 1.2em;
+    transition: color var(--transition);
+}
+
+.subtitle.phase-settle { color: var(--settle-color); }
+.subtitle.phase-meditate { color: var(--meditate-color); }
+.subtitle.phase-emerge { color: var(--emerge-color); }
+.subtitle.phase-complete { color: var(--success); }
+
+.center-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+}
+
+.bottom-area {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    padding-bottom: 12px;
+}
+
+/* ============================================
+   Timer Ring & Play Button
+   ============================================ */
+
+.timer-ring {
+    position: relative;
+    width: 220px;
+    height: 220px;
+}
+
+.progress-svg {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+}
+
+.progress-track {
+    fill: none;
+    stroke: var(--ring-track);
+    stroke-width: 3;
+}
+
+.progress-fill {
+    fill: none;
+    stroke: var(--ring-fill);
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-dasharray: 565.48;
+    stroke-dashoffset: 565.48;
+    transition: stroke-dashoffset 1s linear, stroke var(--transition);
+}
+
+.progress-fill.phase-settle { stroke: var(--settle-color); }
+.progress-fill.phase-meditate { stroke: var(--meditate-color); }
+.progress-fill.phase-emerge { stroke: var(--emerge-color); }
+.progress-fill.phase-complete { stroke: var(--success); }
+
+.play-button {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    border: none;
+    background: var(--accent-soft);
+    color: var(--accent-glow);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--transition), transform 0.15s ease, box-shadow var(--transition);
+}
+
+.play-button:hover {
+    background: rgba(124, 111, 170, 0.25);
+    box-shadow: 0 0 40px rgba(157, 143, 212, 0.15);
+}
+
+.play-button:active {
+    transform: translate(-50%, -50%) scale(0.95);
+}
+
+.play-button svg {
+    width: 44px;
+    height: 44px;
+}
+
+#play-icon {
+    margin-left: 4px; /* optical centering for play triangle */
+}
+
+.hidden {
+    display: none !important;
+}
+
+.timer-display {
+    font-size: 2.4rem;
+    font-weight: 200;
+    letter-spacing: 0.05em;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    min-height: 3rem;
+}
+
+.phase-label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    min-height: 1.1em;
+}
+
+/* ============================================
+   Settings Button
+   ============================================ */
+
+.settings-button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border: 1px solid rgba(124, 111, 170, 0.2);
+    border-radius: 100px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background var(--transition), border-color var(--transition);
+    font-family: inherit;
+}
+
+.settings-button:hover {
+    background: var(--accent-soft);
+    border-color: rgba(124, 111, 170, 0.4);
+}
+
+.settings-button:active {
+    transform: scale(0.97);
+}
+
+/* ============================================
+   Settings Screen
+   ============================================ */
+
+.settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 0 24px;
+    flex-shrink: 0;
+}
+
+.settings-header h2 {
+    font-size: 1.5rem;
+    font-weight: 400;
+    letter-spacing: 0.02em;
+}
+
+.close-button {
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 50%;
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--transition);
+}
+
+.close-button:hover {
+    background: rgba(124, 111, 170, 0.2);
+}
+
+.settings-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.setting-group {
+    background: var(--bg-surface);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.setting-label {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.setting-icon {
+    font-size: 1.3rem;
+}
+
+.setting-name {
+    font-size: 0.95rem;
+    color: var(--text-primary);
+}
+
+.duration-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.duration-btn {
+    width: 36px;
+    height: 36px;
+    border: 1px solid rgba(124, 111, 170, 0.2);
+    border-radius: 50%;
+    background: transparent;
+    color: var(--accent-glow);
+    font-size: 1.2rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--transition), border-color var(--transition);
+    font-family: inherit;
+    line-height: 1;
+}
+
+.duration-btn:hover {
+    background: var(--accent-soft);
+    border-color: rgba(124, 111, 170, 0.4);
+}
+
+.duration-btn:active {
+    transform: scale(0.92);
+}
+
+.duration-value {
+    font-size: 1.3rem;
+    font-weight: 500;
+    min-width: 2ch;
+    text-align: center;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.duration-unit {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-right: 4px;
+}
+
+.preview-group {
+    margin-top: 8px;
+}
+
+.preview-btn {
+    padding: 8px 20px;
+    border: 1px solid rgba(124, 111, 170, 0.25);
+    border-radius: 100px;
+    background: transparent;
+    color: var(--accent-glow);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background var(--transition);
+    font-family: inherit;
+}
+
+.preview-btn:hover {
+    background: var(--accent-soft);
+}
+
+.preview-btn:active {
+    transform: scale(0.96);
+}
+
+.settings-footer {
+    flex-shrink: 0;
+    padding: 20px 0 8px;
+    text-align: center;
+}
+
+.total-time {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+/* ============================================
+   Breathing animation on play button when idle
+   ============================================ */
+
+@keyframes breathe {
+    0%, 100% { box-shadow: 0 0 20px rgba(157, 143, 212, 0.05); }
+    50% { box-shadow: 0 0 40px rgba(157, 143, 212, 0.15); }
+}
+
+.play-button.breathing {
+    animation: breathe 4s ease-in-out infinite;
+}
+
+/* ============================================
+   Ding flash overlay
+   ============================================ */
+
+@keyframes ding-flash {
+    0% { opacity: 0.15; }
+    100% { opacity: 0; }
+}
+
+.ding-overlay {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(circle at center, rgba(157, 143, 212, 0.3), transparent 70%);
+    pointer-events: none;
+    opacity: 0;
+    z-index: 100;
+}
+
+.ding-overlay.flash {
+    animation: ding-flash 2s ease-out forwards;
+}
+
+/* ============================================
+   Responsive tweaks
+   ============================================ */
+
+/* Smaller phones */
+@media (max-height: 667px) {
+    .timer-ring {
+        width: 180px;
+        height: 180px;
+    }
+    .play-button {
+        width: 80px;
+        height: 80px;
+    }
+    .play-button svg {
+        width: 36px;
+        height: 36px;
+    }
+    .timer-display {
+        font-size: 2rem;
+    }
+    .top-area {
+        padding-top: 8px;
+    }
+}
+
+/* Apple Watch-ish small screens */
+@media (max-width: 200px) {
+    .app-title, .subtitle, .phase-label, .bottom-area { display: none; }
+    .timer-ring { width: 120px; height: 120px; }
+    .play-button { width: 60px; height: 60px; }
+    .play-button svg { width: 28px; height: 28px; }
+    .timer-display { font-size: 1.2rem; }
+}
+
+/* Landscape */
+@media (orientation: landscape) and (max-height: 500px) {
+    .center-area { flex-direction: row; gap: 24px; }
+    .timer-ring { width: 160px; height: 160px; }
+    .top-area { padding-top: 4px; }
+}

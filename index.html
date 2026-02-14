@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Stillness">
+    <meta name="theme-color" content="#0a0a1a">
+    <meta name="description" content="A simple, beautiful meditation timer">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; font-src 'self';">
+    <title>Stillness</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Main Screen -->
+        <div id="main-screen" class="screen active">
+            <div class="top-area">
+                <h1 class="app-title">Stillness</h1>
+                <p class="subtitle" id="status-text">Ready to begin</p>
+            </div>
+
+            <div class="center-area">
+                <div class="timer-ring" id="timer-ring">
+                    <svg viewBox="0 0 200 200" class="progress-svg">
+                        <circle cx="100" cy="100" r="90" class="progress-track"/>
+                        <circle cx="100" cy="100" r="90" class="progress-fill" id="progress-fill"/>
+                    </svg>
+                    <button class="play-button" id="play-button" aria-label="Start meditation">
+                        <svg id="play-icon" viewBox="0 0 24 24" fill="currentColor" width="48" height="48">
+                            <path d="M8 5v14l11-7z"/>
+                        </svg>
+                        <svg id="stop-icon" viewBox="0 0 24 24" fill="currentColor" width="48" height="48" class="hidden">
+                            <rect x="6" y="6" width="12" height="12" rx="2"/>
+                        </svg>
+                    </button>
+                </div>
+                <p class="timer-display" id="timer-display"></p>
+                <p class="phase-label" id="phase-label"></p>
+            </div>
+
+            <div class="bottom-area">
+                <button class="settings-button" id="settings-button" aria-label="Adjust settings">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="22" height="22">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
+                    <span>Adjust</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Settings Screen -->
+        <div id="settings-screen" class="screen">
+            <div class="settings-header">
+                <h2>Settings</h2>
+                <button class="close-button" id="close-settings" aria-label="Close settings">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="24" height="24">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="settings-body">
+                <div class="setting-group">
+                    <label class="setting-label">
+                        <span class="setting-icon">🌅</span>
+                        <span class="setting-name">Settling in</span>
+                    </label>
+                    <div class="duration-control">
+                        <button class="duration-btn minus" data-target="settle" data-dir="-1" aria-label="Decrease settling time">−</button>
+                        <span class="duration-value" id="settle-value">2</span>
+                        <span class="duration-unit">min</span>
+                        <button class="duration-btn plus" data-target="settle" data-dir="1" aria-label="Increase settling time">+</button>
+                    </div>
+                </div>
+
+                <div class="setting-group">
+                    <label class="setting-label">
+                        <span class="setting-icon">🧘</span>
+                        <span class="setting-name">Meditation</span>
+                    </label>
+                    <div class="duration-control">
+                        <button class="duration-btn minus" data-target="meditate" data-dir="-1" aria-label="Decrease meditation time">−</button>
+                        <span class="duration-value" id="meditate-value">20</span>
+                        <span class="duration-unit">min</span>
+                        <button class="duration-btn plus" data-target="meditate" data-dir="1" aria-label="Increase meditation time">+</button>
+                    </div>
+                </div>
+
+                <div class="setting-group">
+                    <label class="setting-label">
+                        <span class="setting-icon">🌄</span>
+                        <span class="setting-name">Emerging</span>
+                    </label>
+                    <div class="duration-control">
+                        <button class="duration-btn minus" data-target="emerge" data-dir="-1" aria-label="Decrease emerging time">−</button>
+                        <span class="duration-value" id="emerge-value">2</span>
+                        <span class="duration-unit">min</span>
+                        <button class="duration-btn plus" data-target="emerge" data-dir="1" aria-label="Increase emerging time">+</button>
+                    </div>
+                </div>
+
+                <div class="setting-group preview-group">
+                    <label class="setting-label">
+                        <span class="setting-icon">🔔</span>
+                        <span class="setting-name">Preview bowl sound</span>
+                    </label>
+                    <button class="preview-btn" id="preview-sound" aria-label="Preview bowl sound">
+                        Play
+                    </button>
+                </div>
+            </div>
+
+            <div class="settings-footer">
+                <p class="total-time" id="total-time">Total: 24 minutes</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

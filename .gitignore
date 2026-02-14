@@ -1,0 +1,5 @@
+.certs/
+generate_icons.py
+*.pyc
+__pycache__/
+.DS_Store
