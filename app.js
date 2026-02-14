@@ -3,10 +3,6 @@
 /* ============================================
    Stillness — Meditation Timer
    Zero external dependencies
-
-   Audio strategy: render bowl sounds directly
-   into WAV files played via <audio> elements.
-   No Web Audio API — iOS blocks it too often.
    ============================================ */
 
 (function() {
@@ -31,7 +27,6 @@
 
     // ── Constants ──
     var CIRCUMFERENCE = 2 * Math.PI * 90;
-    var SAMPLE_RATE = 44100;
 
     // ── State ──
     var durations = loadDurations();
@@ -44,62 +39,28 @@
     var bellTimes = [];
     var bellFired = [];
 
-    // The single <audio> element that plays the entire session audio
-    // (silence with bowl sounds baked in at the right timestamps)
-    var sessionAudio = document.createElement("audio");
-    sessionAudio.setAttribute("x-webkit-airplay", "deny");
-    sessionAudio.style.display = "none";
-    document.body.appendChild(sessionAudio);
+    // ── Audio ──
+    // Single AudioContext, created once on first user gesture, never closed.
+    var audioCtx = null;
 
-    // Pre-rendered bowl sound blob URL (just the ding, ~6 seconds)
-    var bowlSoundUrl = null;
-
-    /* ============================================
-       WAV file generation utilities
-       ============================================ */
-    function writeString(view, offset, str) {
-        for (var i = 0; i < str.length; i++) {
-            view.setUint8(offset + i, str.charCodeAt(i));
+    function ensureAudioContext() {
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         }
-    }
-
-    function createWavBlob(samples, sampleRate) {
-        var numSamples = samples.length;
-        var dataSize = numSamples * 2;
-        var buffer = new ArrayBuffer(44 + dataSize);
-        var view = new DataView(buffer);
-
-        writeString(view, 0, "RIFF");
-        view.setUint32(4, 36 + dataSize, true);
-        writeString(view, 8, "WAVE");
-        writeString(view, 12, "fmt ");
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true);          // PCM
-        view.setUint16(22, 1, true);          // mono
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * 2, true);
-        view.setUint16(32, 2, true);
-        view.setUint16(34, 16, true);
-        writeString(view, 36, "data");
-        view.setUint32(40, dataSize, true);
-
-        // Write 16-bit samples
-        for (var i = 0; i < numSamples; i++) {
-            var s = Math.max(-1, Math.min(1, samples[i]));
-            view.setInt16(44 + i * 2, s * 32767, true);
+        if (audioCtx.state === "suspended") {
+            audioCtx.resume();
         }
-
-        return new Blob([buffer], { type: "audio/wav" });
+        return audioCtx;
     }
 
     /* ============================================
-       Singing Bowl Sound — rendered to sample array
-       Returns Float32Array of audio samples
+       Singing Bowl Sound
+       Schedules a bowl ding at `when` (AudioContext time).
+       All scheduling must happen within a user gesture
+       call stack for iOS to allow playback.
        ============================================ */
-    function renderBowlSamples() {
-        var duration = 6; // seconds
-        var numSamples = Math.ceil(SAMPLE_RATE * duration);
-        var samples = new Float32Array(numSamples);
+    function scheduleBowlSound(ctx, when) {
+        var duration = 6;
 
         var partials = [
             { freq: 220,  gain: 0.35, decay: 5.0 },
@@ -110,70 +71,50 @@
             { freq: 1100, gain: 0.03, decay: 2.0 },
         ];
 
-        for (var i = 0; i < numSamples; i++) {
-            var t = i / SAMPLE_RATE;
-            var sample = 0;
+        var masterGain = ctx.createGain();
+        masterGain.gain.setValueAtTime(0.6, when);
+        masterGain.connect(ctx.destination);
 
-            for (var p = 0; p < partials.length; p++) {
-                var partial = partials[p];
-                // Slight pitch drift for realism
-                var freq = partial.freq + (partial.freq * -0.002) * (t / partial.decay);
-                // Exponential decay envelope
-                var envelope = partial.gain * Math.exp(-t * (5.0 / partial.decay));
-                // Quick attack (first 20ms)
-                var attack = t < 0.02 ? t / 0.02 : 1.0;
-                sample += Math.sin(2 * Math.PI * freq * t) * envelope * attack;
-            }
+        for (var i = 0; i < partials.length; i++) {
+            var p = partials[i];
+            var osc = ctx.createOscillator();
+            var oscGain = ctx.createGain();
 
-            // Strike transient (first 80ms): filtered noise burst
-            if (t < 0.08) {
-                var noiseEnv = 0.15 * Math.exp(-t * 50);
-                // Simple pseudo-filtered noise using sin at various frequencies
-                var noise = Math.sin(t * 800 * 2 * Math.PI + i) *
-                            Math.sin(t * 1200 * 2 * Math.PI + i * 0.7) * 0.5;
-                sample += noise * noiseEnv;
-            }
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(p.freq, when);
+            oscGain.gain.setValueAtTime(0.001, when);
+            oscGain.gain.linearRampToValueAtTime(p.gain, when + 0.02);
+            oscGain.gain.exponentialRampToValueAtTime(0.0001, when + p.decay);
+            osc.frequency.linearRampToValueAtTime(p.freq * 0.998, when + p.decay);
 
-            samples[i] = sample * 0.6; // master volume
+            osc.connect(oscGain);
+            oscGain.connect(masterGain);
+            osc.start(when);
+            osc.stop(when + duration);
         }
 
-        return samples;
-    }
-
-    /**
-     * Build a WAV file for the entire session:
-     * silence with bowl sounds mixed in at the bell timestamps.
-     * bellOffsets: array of offsets in seconds from start where bells should play
-     */
-    function renderSessionWav(totalDurationSeconds, bellOffsets) {
-        var bowlSamples = renderBowlSamples();
-        var totalSamples = Math.ceil(SAMPLE_RATE * totalDurationSeconds);
-        var session = new Float32Array(totalSamples); // initialized to 0 (silence)
-
-        for (var b = 0; b < bellOffsets.length; b++) {
-            var startSample = Math.floor(bellOffsets[b] * SAMPLE_RATE);
-            for (var i = 0; i < bowlSamples.length; i++) {
-                var idx = startSample + i;
-                if (idx < totalSamples) {
-                    session[idx] += bowlSamples[i];
-                }
-            }
+        // Strike transient
+        var noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.08), ctx.sampleRate);
+        var noiseData = noiseBuf.getChannelData(0);
+        for (var j = 0; j < noiseData.length; j++) {
+            noiseData[j] = (Math.random() * 2 - 1) * 0.3;
         }
+        var noise = ctx.createBufferSource();
+        noise.buffer = noiseBuf;
 
-        // Clamp
-        for (var j = 0; j < totalSamples; j++) {
-            if (session[j] > 1) session[j] = 1;
-            if (session[j] < -1) session[j] = -1;
-        }
+        var noiseFilter = ctx.createBiquadFilter();
+        noiseFilter.type = "bandpass";
+        noiseFilter.frequency.value = 800;
+        noiseFilter.Q.value = 1.5;
 
-        return createWavBlob(session, SAMPLE_RATE);
-    }
+        var noiseGain = ctx.createGain();
+        noiseGain.gain.setValueAtTime(0.15, when);
+        noiseGain.gain.exponentialRampToValueAtTime(0.001, when + 0.08);
 
-    /**
-     * Render just the bowl sound as a standalone WAV for preview
-     */
-    function renderBowlWav() {
-        return createWavBlob(renderBowlSamples(), SAMPLE_RATE);
+        noise.connect(noiseFilter);
+        noiseFilter.connect(noiseGain);
+        noiseGain.connect(masterGain);
+        noise.start(when);
     }
 
     function showDingFlash() {
@@ -245,51 +186,44 @@
             return;
         }
         if (state === "complete") {
-            stopSession();
+            state = "idle";
         }
 
+        // 1. Ensure AudioContext exists and is running
+        var ctx = ensureAudioContext();
+
+        // 2. Calculate timeline
         var settleSeconds   = durations.settle * 60;
         var meditateSeconds = durations.meditate * 60;
         var emergeSeconds   = durations.emerge * 60;
-        var totalSeconds    = settleSeconds + meditateSeconds + emergeSeconds;
 
-        // Bell offsets from session start (in seconds)
-        var bellOffsets = [
-            0,                                              // bell 1: start settling
-            settleSeconds,                                  // bell 2: start meditating
-            settleSeconds + meditateSeconds,                // bell 3: start emerging
-            settleSeconds + meditateSeconds + emergeSeconds // bell 4: complete
-        ];
+        // 3. Schedule all four bells on the AudioContext timeline
+        //    This all happens synchronously within the click handler,
+        //    so iOS treats it as user-gesture-initiated audio.
+        var now = ctx.currentTime;
+        scheduleBowlSound(ctx, now);
+        scheduleBowlSound(ctx, now + settleSeconds);
+        scheduleBowlSound(ctx, now + settleSeconds + meditateSeconds);
+        scheduleBowlSound(ctx, now + settleSeconds + meditateSeconds + emergeSeconds);
 
-        // Render the entire session as a single WAV with bells baked in
-        var wavBlob = renderSessionWav(totalSeconds + 8, bellOffsets);
-        var wavUrl = URL.createObjectURL(wavBlob);
-
-        // Clean up previous
-        if (sessionAudio._blobUrl) { URL.revokeObjectURL(sessionAudio._blobUrl); }
-        sessionAudio._blobUrl = wavUrl;
-        sessionAudio.src = wavUrl;
-        var playPromise = sessionAudio.play();
-        if (playPromise && playPromise.catch) { playPromise.catch(function() {}); }
-
-        // Build phase timeline using wall-clock timestamps for the UI
+        // 4. Build phase timeline (wall-clock for UI)
         var wallNow = Date.now();
         phases = [
-            { name: "settle",   start: wallNow,                                            end: wallNow + settleSeconds * 1000 },
-            { name: "meditate", start: wallNow + settleSeconds * 1000,                     end: wallNow + (settleSeconds + meditateSeconds) * 1000 },
-            { name: "emerge",   start: wallNow + (settleSeconds + meditateSeconds) * 1000,  end: wallNow + totalSeconds * 1000 },
+            { name: "settle",   start: wallNow, end: wallNow + settleSeconds * 1000 },
+            { name: "meditate", start: wallNow + settleSeconds * 1000, end: wallNow + (settleSeconds + meditateSeconds) * 1000 },
+            { name: "emerge",   start: wallNow + (settleSeconds + meditateSeconds) * 1000, end: wallNow + (settleSeconds + meditateSeconds + emergeSeconds) * 1000 },
         ];
-        sessionEndTime = wallNow + totalSeconds * 1000;
+        sessionEndTime = wallNow + (settleSeconds + meditateSeconds + emergeSeconds) * 1000;
 
-        // Bell wall-clock times for visual flash
-        bellTimes = [];
-        bellFired = [];
-        for (var i = 0; i < bellOffsets.length; i++) {
-            bellTimes.push(wallNow + bellOffsets[i] * 1000);
-            bellFired.push(i === 0); // first bell fires immediately
-        }
+        bellTimes = [
+            wallNow,
+            wallNow + settleSeconds * 1000,
+            wallNow + (settleSeconds + meditateSeconds) * 1000,
+            wallNow + (settleSeconds + meditateSeconds + emergeSeconds) * 1000,
+        ];
+        bellFired = [true, false, false, false];
 
-        // Update UI
+        // 5. Update UI
         state = "running";
         currentPhase = "";
         playButton.classList.remove("breathing");
@@ -307,15 +241,8 @@
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
 
-        // Stop session audio
-        try {
-            sessionAudio.pause();
-            sessionAudio.removeAttribute("src");
-            if (sessionAudio._blobUrl) {
-                URL.revokeObjectURL(sessionAudio._blobUrl);
-                sessionAudio._blobUrl = null;
-            }
-        } catch (e) { /* ignore */ }
+        // Don't close the AudioContext — just let scheduled sounds finish
+        // or they'll be cut off. Closing and recreating causes iOS issues.
 
         releaseWakeLock();
 
@@ -344,7 +271,7 @@
             return;
         }
 
-        // Fire visual flash for bells
+        // Visual flash for bells
         for (var b = 0; b < bellTimes.length; b++) {
             if (!bellFired[b] && now >= bellTimes[b]) {
                 bellFired[b] = true;
@@ -390,7 +317,6 @@
 
     function completeSession() {
         showDingFlash();
-
         state = "complete";
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
@@ -408,8 +334,6 @@
 
         releaseWakeLock();
 
-        // Session audio will stop naturally when it ends.
-        // Auto-reset UI after 10 seconds.
         setTimeout(function() {
             if (state === "complete") { stopSession(); }
         }, 10000);
@@ -467,16 +391,8 @@
     closeSettingsBtn.addEventListener("click", closeSettingsPanel);
 
     previewSound.addEventListener("click", function() {
-        // Render bowl and play via <audio>
-        try {
-            var blob = renderBowlWav();
-            var url = URL.createObjectURL(blob);
-            if (sessionAudio._blobUrl) { URL.revokeObjectURL(sessionAudio._blobUrl); }
-            sessionAudio._blobUrl = url;
-            sessionAudio.src = url;
-            var p = sessionAudio.play();
-            if (p && p.catch) { p.catch(function(){}); }
-        } catch (e) { /* ignore */ }
+        var ctx = ensureAudioContext();
+        scheduleBowlSound(ctx, ctx.currentTime);
         showDingFlash();
     });
 
@@ -491,10 +407,13 @@
         })(durationBtns[i]);
     }
 
-    // When page becomes visible again, catch up UI
     document.addEventListener("visibilitychange", function() {
         if (document.visibilityState === "visible" && state === "running") {
             requestWakeLockAsync();
+            // Resume audio context if iOS suspended it
+            if (audioCtx && audioCtx.state === "suspended") {
+                audioCtx.resume();
+            }
             if (timerRAF) cancelAnimationFrame(timerRAF);
             tickLoop();
         }
