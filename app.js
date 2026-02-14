@@ -3,6 +3,9 @@
 /* ============================================
    Stillness — Meditation Timer
    Zero external dependencies
+
+   Audio: uses a pre-rendered bowl.wav file played
+   through plain <audio> elements. No Web Audio API.
    ============================================ */
 
 (function() {
@@ -38,103 +41,35 @@
     var sessionEndTime = 0;
     var bellTimes = [];
     var bellFired = [];
-
-    // ── Audio ──
-    // Single AudioContext, created once on first user gesture, never closed.
-    var audioCtx = null;
-    var audioWatchdog = null; // interval that keeps AudioContext alive
-
-    function ensureAudioContext() {
-        if (!audioCtx) {
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (audioCtx.state === "suspended") {
-            audioCtx.resume();
-        }
-        return audioCtx;
-    }
-
-    // Watchdog: iOS sometimes suspends the AudioContext even while the page
-    // is in the foreground. This interval checks every 3 seconds and resumes
-    // it if needed, keeping the pre-scheduled bells alive.
-    function startAudioWatchdog() {
-        stopAudioWatchdog();
-        audioWatchdog = setInterval(function() {
-            if (audioCtx && audioCtx.state === "suspended") {
-                audioCtx.resume();
-            }
-        }, 3000);
-    }
-
-    function stopAudioWatchdog() {
-        if (audioWatchdog) {
-            clearInterval(audioWatchdog);
-            audioWatchdog = null;
-        }
-    }
+    var bellTimeouts = [];
 
     /* ============================================
-       Singing Bowl Sound
-       Schedules a bowl ding at `when` (AudioContext time).
-       All scheduling must happen within a user gesture
-       call stack for iOS to allow playback.
+       Audio — plain <audio> elements playing bowl.wav
+       This is how Instagram, Pandora, etc. play audio.
+       iOS handles this reliably in all conditions.
        ============================================ */
-    function scheduleBowlSound(ctx, when) {
-        var duration = 6;
 
-        var partials = [
-            { freq: 220,  gain: 0.35, decay: 5.0 },
-            { freq: 440,  gain: 0.20, decay: 4.0 },
-            { freq: 528,  gain: 0.12, decay: 3.5 },
-            { freq: 660,  gain: 0.08, decay: 3.0 },
-            { freq: 880,  gain: 0.05, decay: 2.5 },
-            { freq: 1100, gain: 0.03, decay: 2.0 },
-        ];
+    // Pre-create a pool of <audio> elements so we can play
+    // overlapping sounds (a bell might still be ringing when
+    // the next one starts). 4 bells = 4 elements.
+    var audioPool = [];
+    for (var a = 0; a < 4; a++) {
+        var el = document.createElement("audio");
+        el.preload = "auto";
+        el.src = "bowl.wav";
+        el.style.display = "none";
+        document.body.appendChild(el);
+        audioPool.push(el);
+    }
+    var nextAudioIndex = 0;
 
-        var masterGain = ctx.createGain();
-        masterGain.gain.setValueAtTime(0.6, when);
-        masterGain.connect(ctx.destination);
-
-        for (var i = 0; i < partials.length; i++) {
-            var p = partials[i];
-            var osc = ctx.createOscillator();
-            var oscGain = ctx.createGain();
-
-            osc.type = "sine";
-            osc.frequency.setValueAtTime(p.freq, when);
-            oscGain.gain.setValueAtTime(0.001, when);
-            oscGain.gain.linearRampToValueAtTime(p.gain, when + 0.02);
-            oscGain.gain.exponentialRampToValueAtTime(0.0001, when + p.decay);
-            osc.frequency.linearRampToValueAtTime(p.freq * 0.998, when + p.decay);
-
-            osc.connect(oscGain);
-            oscGain.connect(masterGain);
-            osc.start(when);
-            osc.stop(when + duration);
-        }
-
-        // Strike transient
-        var noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.08), ctx.sampleRate);
-        var noiseData = noiseBuf.getChannelData(0);
-        for (var j = 0; j < noiseData.length; j++) {
-            noiseData[j] = (Math.random() * 2 - 1) * 0.3;
-        }
-        var noise = ctx.createBufferSource();
-        noise.buffer = noiseBuf;
-
-        var noiseFilter = ctx.createBiquadFilter();
-        noiseFilter.type = "bandpass";
-        noiseFilter.frequency.value = 800;
-        noiseFilter.Q.value = 1.5;
-
-        var noiseGain = ctx.createGain();
-        noiseGain.gain.setValueAtTime(0.15, when);
-        noiseGain.gain.exponentialRampToValueAtTime(0.001, when + 0.08);
-
-        noise.connect(noiseFilter);
-        noiseFilter.connect(noiseGain);
-        noiseGain.connect(masterGain);
-        noise.start(when);
+    function playBowlNow() {
+        var el = audioPool[nextAudioIndex % audioPool.length];
+        nextAudioIndex++;
+        el.currentTime = 0;
+        var p = el.play();
+        if (p && p.catch) { p.catch(function() {}); }
+        showDingFlash();
     }
 
     function showDingFlash() {
@@ -209,51 +144,58 @@
             state = "idle";
         }
 
-        // 1. Ensure AudioContext exists and is running
-        var ctx = ensureAudioContext();
-
-        // 2. Calculate timeline
         var settleSeconds   = durations.settle * 60;
         var meditateSeconds = durations.meditate * 60;
         var emergeSeconds   = durations.emerge * 60;
+        var totalSeconds    = settleSeconds + meditateSeconds + emergeSeconds;
 
-        // 3. Schedule all four bells on the AudioContext timeline
-        //    This all happens synchronously within the click handler,
-        //    so iOS treats it as user-gesture-initiated audio.
-        var now = ctx.currentTime;
-        scheduleBowlSound(ctx, now);
-        scheduleBowlSound(ctx, now + settleSeconds);
-        scheduleBowlSound(ctx, now + settleSeconds + meditateSeconds);
-        scheduleBowlSound(ctx, now + settleSeconds + meditateSeconds + emergeSeconds);
+        // Bell offsets in milliseconds from now
+        var offsets = [
+            0,
+            settleSeconds * 1000,
+            (settleSeconds + meditateSeconds) * 1000,
+            totalSeconds * 1000,
+        ];
 
-        // 4. Build phase timeline (wall-clock for UI)
+        // Play the first bell immediately (this is in the user gesture context)
+        playBowlNow();
+
+        // Schedule the remaining bells with setTimeout
+        // (setTimeout is fine here — the bells are <audio> elements,
+        //  not Web Audio API, so iOS won't block them)
+        bellTimeouts = [];
+        for (var i = 1; i < offsets.length; i++) {
+            (function(index, delay) {
+                var tid = setTimeout(function() {
+                    playBowlNow();
+                }, delay);
+                bellTimeouts.push(tid);
+            })(i, offsets[i]);
+        }
+
+        // Build phase timeline (wall-clock for UI)
         var wallNow = Date.now();
         phases = [
             { name: "settle",   start: wallNow, end: wallNow + settleSeconds * 1000 },
             { name: "meditate", start: wallNow + settleSeconds * 1000, end: wallNow + (settleSeconds + meditateSeconds) * 1000 },
-            { name: "emerge",   start: wallNow + (settleSeconds + meditateSeconds) * 1000, end: wallNow + (settleSeconds + meditateSeconds + emergeSeconds) * 1000 },
+            { name: "emerge",   start: wallNow + (settleSeconds + meditateSeconds) * 1000, end: wallNow + totalSeconds * 1000 },
         ];
-        sessionEndTime = wallNow + (settleSeconds + meditateSeconds + emergeSeconds) * 1000;
+        sessionEndTime = wallNow + totalSeconds * 1000;
 
-        bellTimes = [
-            wallNow,
-            wallNow + settleSeconds * 1000,
-            wallNow + (settleSeconds + meditateSeconds) * 1000,
-            wallNow + (settleSeconds + meditateSeconds + emergeSeconds) * 1000,
-        ];
-        bellFired = [true, false, false, false];
+        bellTimes = [];
+        bellFired = [];
+        for (var j = 0; j < offsets.length; j++) {
+            bellTimes.push(wallNow + offsets[j]);
+            bellFired.push(j === 0);
+        }
 
-        // 5. Start watchdog to keep AudioContext alive
-        startAudioWatchdog();
-
-        // 6. Update UI
+        // Update UI
         state = "running";
         currentPhase = "";
         playButton.classList.remove("breathing");
         playIcon.classList.add("hidden");
         stopIcon.classList.remove("hidden");
         requestWakeLockAsync();
-        showDingFlash();
 
         if (timerRAF) cancelAnimationFrame(timerRAF);
         tickLoop();
@@ -263,10 +205,17 @@
         state = "idle";
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
-        stopAudioWatchdog();
 
-        // Don't close the AudioContext — just let scheduled sounds finish
-        // or they'll be cut off. Closing and recreating causes iOS issues.
+        // Cancel scheduled bells
+        for (var i = 0; i < bellTimeouts.length; i++) {
+            clearTimeout(bellTimeouts[i]);
+        }
+        bellTimeouts = [];
+
+        // Stop any playing audio
+        for (var j = 0; j < audioPool.length; j++) {
+            try { audioPool[j].pause(); audioPool[j].currentTime = 0; } catch (e) {}
+        }
 
         releaseWakeLock();
 
@@ -295,7 +244,7 @@
             return;
         }
 
-        // Visual flash for bells
+        // Visual flash for bells (audio is handled by setTimeout)
         for (var b = 0; b < bellTimes.length; b++) {
             if (!bellFired[b] && now >= bellTimes[b]) {
                 bellFired[b] = true;
@@ -340,7 +289,6 @@
     }
 
     function completeSession() {
-        showDingFlash();
         state = "complete";
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
@@ -415,9 +363,7 @@
     closeSettingsBtn.addEventListener("click", closeSettingsPanel);
 
     previewSound.addEventListener("click", function() {
-        var ctx = ensureAudioContext();
-        scheduleBowlSound(ctx, ctx.currentTime);
-        showDingFlash();
+        playBowlNow();
     });
 
     var durationBtns = document.querySelectorAll(".duration-btn");
@@ -434,10 +380,6 @@
     document.addEventListener("visibilitychange", function() {
         if (document.visibilityState === "visible" && state === "running") {
             requestWakeLockAsync();
-            // Resume audio context if iOS suspended it
-            if (audioCtx && audioCtx.state === "suspended") {
-                audioCtx.resume();
-            }
             if (timerRAF) cancelAnimationFrame(timerRAF);
             tickLoop();
         }
