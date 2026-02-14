@@ -4,8 +4,12 @@
    Stillness — Meditation Timer
    Zero external dependencies
 
-   Audio: uses a pre-rendered bowl.wav file played
-   through plain <audio> elements. No Web Audio API.
+   Audio strategy:
+   - bowl.wav is a pre-rendered singing bowl sound
+   - A hidden <audio> element plays bowl.wav on loop at zero volume
+     as a "heartbeat" — iOS keeps it alive and fires timeupdate events
+   - On each timeupdate, we check if a bell is due and play it
+   - Bell playback uses separate <audio> elements with bowl.wav
    ============================================ */
 
 (function() {
@@ -41,35 +45,59 @@
     var sessionEndTime = 0;
     var bellTimes = [];
     var bellFired = [];
-    var bellTimeouts = [];
 
     /* ============================================
-       Audio — plain <audio> elements playing bowl.wav
-       This is how Instagram, Pandora, etc. play audio.
-       iOS handles this reliably in all conditions.
+       Audio elements
        ============================================ */
 
-    // Pre-create a pool of <audio> elements so we can play
-    // overlapping sounds (a bell might still be ringing when
-    // the next one starts). 4 bells = 4 elements.
-    var audioPool = [];
+    // Heartbeat: loops bowl.wav at near-zero volume.
+    // iOS keeps <audio> elements alive and fires timeupdate events,
+    // which we use as a reliable timer to trigger bells.
+    var heartbeat = document.createElement("audio");
+    heartbeat.preload = "auto";
+    heartbeat.loop = true;
+    heartbeat.src = "bowl.wav";
+    heartbeat.volume = 0.01; // near-silent but not zero (iOS may skip zero-volume)
+    heartbeat.style.display = "none";
+    document.body.appendChild(heartbeat);
+
+    // Bell players: 4 <audio> elements for playing the actual bowl sounds
+    var bellPlayers = [];
     for (var a = 0; a < 4; a++) {
         var el = document.createElement("audio");
         el.preload = "auto";
         el.src = "bowl.wav";
         el.style.display = "none";
         document.body.appendChild(el);
-        audioPool.push(el);
+        bellPlayers.push(el);
     }
-    var nextAudioIndex = 0;
+    var nextBellIndex = 0;
 
-    function playBowlNow() {
-        var el = audioPool[nextAudioIndex % audioPool.length];
-        nextAudioIndex++;
+    function playBell() {
+        var el = bellPlayers[nextBellIndex % bellPlayers.length];
+        nextBellIndex++;
         el.currentTime = 0;
+        el.volume = 1.0;
         var p = el.play();
         if (p && p.catch) { p.catch(function() {}); }
         showDingFlash();
+    }
+
+    // Heartbeat timeupdate handler — checks if any bells are due
+    heartbeat.addEventListener("timeupdate", function() {
+        if (state !== "running") return;
+        checkBells();
+        updateUI();
+    });
+
+    function checkBells() {
+        var now = Date.now();
+        for (var i = 0; i < bellTimes.length; i++) {
+            if (!bellFired[i] && now >= bellTimes[i]) {
+                bellFired[i] = true;
+                playBell();
+            }
+        }
     }
 
     function showDingFlash() {
@@ -149,32 +177,18 @@
         var emergeSeconds   = durations.emerge * 60;
         var totalSeconds    = settleSeconds + meditateSeconds + emergeSeconds;
 
-        // Bell offsets in milliseconds from now
-        var offsets = [
-            0,
-            settleSeconds * 1000,
-            (settleSeconds + meditateSeconds) * 1000,
-            totalSeconds * 1000,
-        ];
-
-        // Play the first bell immediately (this is in the user gesture context)
-        playBowlNow();
-
-        // Schedule the remaining bells with setTimeout
-        // (setTimeout is fine here — the bells are <audio> elements,
-        //  not Web Audio API, so iOS won't block them)
-        bellTimeouts = [];
-        for (var i = 1; i < offsets.length; i++) {
-            (function(index, delay) {
-                var tid = setTimeout(function() {
-                    playBowlNow();
-                }, delay);
-                bellTimeouts.push(tid);
-            })(i, offsets[i]);
-        }
-
-        // Build phase timeline (wall-clock for UI)
         var wallNow = Date.now();
+
+        // Bell times (absolute wall-clock)
+        bellTimes = [
+            wallNow,                                                    // bell 1
+            wallNow + settleSeconds * 1000,                            // bell 2
+            wallNow + (settleSeconds + meditateSeconds) * 1000,        // bell 3
+            wallNow + (settleSeconds + meditateSeconds + emergeSeconds) * 1000, // bell 4
+        ];
+        bellFired = [false, false, false, false];
+
+        // Phase timeline
         phases = [
             { name: "settle",   start: wallNow, end: wallNow + settleSeconds * 1000 },
             { name: "meditate", start: wallNow + settleSeconds * 1000, end: wallNow + (settleSeconds + meditateSeconds) * 1000 },
@@ -182,12 +196,14 @@
         ];
         sessionEndTime = wallNow + totalSeconds * 1000;
 
-        bellTimes = [];
-        bellFired = [];
-        for (var j = 0; j < offsets.length; j++) {
-            bellTimes.push(wallNow + offsets[j]);
-            bellFired.push(j === 0);
-        }
+        // Start the heartbeat (keeps iOS audio alive, drives our timer)
+        heartbeat.currentTime = 0;
+        var hp = heartbeat.play();
+        if (hp && hp.catch) { hp.catch(function() {}); }
+
+        // Play first bell immediately (we're in user gesture context)
+        bellFired[0] = true;
+        playBell();
 
         // Update UI
         state = "running";
@@ -206,15 +222,12 @@
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
 
-        // Cancel scheduled bells
-        for (var i = 0; i < bellTimeouts.length; i++) {
-            clearTimeout(bellTimeouts[i]);
-        }
-        bellTimeouts = [];
+        // Stop heartbeat
+        try { heartbeat.pause(); } catch (e) {}
 
-        // Stop any playing audio
-        for (var j = 0; j < audioPool.length; j++) {
-            try { audioPool[j].pause(); audioPool[j].currentTime = 0; } catch (e) {}
+        // Stop any playing bells
+        for (var j = 0; j < bellPlayers.length; j++) {
+            try { bellPlayers[j].pause(); bellPlayers[j].currentTime = 0; } catch (e) {}
         }
 
         releaseWakeLock();
@@ -232,11 +245,9 @@
     }
 
     /* ============================================
-       UI Tick Loop
+       UI Updates
        ============================================ */
-    function tickLoop() {
-        if (state !== "running") return;
-
+    function updateUI() {
         var now = Date.now();
 
         if (now >= sessionEndTime) {
@@ -244,15 +255,6 @@
             return;
         }
 
-        // Visual flash for bells (audio is handled by setTimeout)
-        for (var b = 0; b < bellTimes.length; b++) {
-            if (!bellFired[b] && now >= bellTimes[b]) {
-                bellFired[b] = true;
-                showDingFlash();
-            }
-        }
-
-        // Find current phase
         var phase = null;
         for (var i = 0; i < phases.length; i++) {
             if (now >= phases[i].start && now < phases[i].end) {
@@ -284,6 +286,21 @@
             timerDisplay.textContent = mins + ":" + (secs < 10 ? "0" : "") + secs;
             setProgress(progress);
         }
+    }
+
+    // RAF loop for smooth UI updates (timeupdate fires ~4x/sec which is choppy)
+    function tickLoop() {
+        if (state !== "running") return;
+
+        var now = Date.now();
+        if (now >= sessionEndTime) {
+            completeSession();
+            return;
+        }
+
+        // Also check bells from RAF in case timeupdate is slow
+        checkBells();
+        updateUI();
 
         timerRAF = requestAnimationFrame(tickLoop);
     }
@@ -292,6 +309,9 @@
         state = "complete";
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
+
+        // Stop heartbeat
+        try { heartbeat.pause(); } catch (e) {}
 
         statusText.textContent = "Session complete";
         statusText.className = "subtitle phase-complete";
@@ -363,7 +383,7 @@
     closeSettingsBtn.addEventListener("click", closeSettingsPanel);
 
     previewSound.addEventListener("click", function() {
-        playBowlNow();
+        playBell();
     });
 
     var durationBtns = document.querySelectorAll(".duration-btn");
@@ -380,6 +400,8 @@
     document.addEventListener("visibilitychange", function() {
         if (document.visibilityState === "visible" && state === "running") {
             requestWakeLockAsync();
+            checkBells();
+            updateUI();
             if (timerRAF) cancelAnimationFrame(timerRAF);
             tickLoop();
         }
