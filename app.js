@@ -4,12 +4,13 @@
    Stillness — Meditation Timer
    Zero external dependencies
 
-   Audio strategy:
-   - bowl.wav is a pre-rendered singing bowl sound
-   - A hidden <audio> element plays bowl.wav on loop at zero volume
-     as a "heartbeat" — iOS keeps it alive and fires timeupdate events
-   - On each timeupdate, we check if a bell is due and play it
-   - Bell playback uses separate <audio> elements with bowl.wav
+   Audio strategy (iOS-proof):
+   - On session start, fetch bowl.wav and decode its raw PCM samples
+   - Build a single WAV blob containing the entire session:
+     silence with bowl sounds mixed in at the correct timestamps
+   - Play that single WAV via one <audio> element
+   - iOS plays it as one continuous stream — no timers needed for bells
+   - UI updates via requestAnimationFrame + audio timeupdate fallback
    ============================================ */
 
 (function() {
@@ -34,6 +35,7 @@
 
     // ── Constants ──
     var CIRCUMFERENCE = 2 * Math.PI * 90;
+    var SAMPLE_RATE = 44100;
 
     // ── State ──
     var durations = loadDurations();
@@ -43,63 +45,161 @@
     var wakeLock = null;
     var phases = [];
     var sessionEndTime = 0;
-    var bellTimes = [];
-    var bellFired = [];
+    var sessionStartTime = 0;
+
+    // The single <audio> element that plays the entire session
+    var sessionAudio = document.createElement("audio");
+    sessionAudio.preload = "auto";
+    sessionAudio.style.display = "none";
+    document.body.appendChild(sessionAudio);
+
+    // Cached bowl samples (Int16Array of raw PCM)
+    var bowlSamples = null;
+    var bowlLoading = false;
+
+    // Bell offsets in seconds (for ding flash UI)
+    var bellOffsets = [];
+    var bellFlashed = [];
+
+    // Preview player
+    var previewEl = document.createElement("audio");
+    previewEl.preload = "auto";
+    previewEl.src = "bowl.wav";
+    previewEl.style.display = "none";
+    document.body.appendChild(previewEl);
 
     /* ============================================
-       Audio elements
+       Load and decode bowl.wav into raw PCM samples
        ============================================ */
+    function loadBowlSamples(callback) {
+        if (bowlSamples) {
+            callback(bowlSamples);
+            return;
+        }
+        if (bowlLoading) {
+            // Wait for it
+            var check = setInterval(function() {
+                if (bowlSamples) {
+                    clearInterval(check);
+                    callback(bowlSamples);
+                }
+            }, 50);
+            return;
+        }
+        bowlLoading = true;
 
-    // Heartbeat: loops bowl.wav at near-zero volume.
-    // iOS keeps <audio> elements alive and fires timeupdate events,
-    // which we use as a reliable timer to trigger bells.
-    var heartbeat = document.createElement("audio");
-    heartbeat.preload = "auto";
-    heartbeat.loop = true;
-    heartbeat.src = "silence.wav";
-    heartbeat.volume = 0.01; // near-silent but not zero (iOS may skip zero-volume)
-    heartbeat.style.display = "none";
-    document.body.appendChild(heartbeat);
+        // Fetch the raw bytes of bowl.wav
+        fetch("bowl.wav").then(function(resp) {
+            return resp.arrayBuffer();
+        }).then(function(arrayBuf) {
+            // Parse the WAV file manually to extract Int16 PCM samples
+            // (We don't use Web Audio decodeAudioData because we need Int16,
+            //  and this avoids creating an AudioContext entirely)
+            var view = new DataView(arrayBuf);
 
-    // Bell players: 4 <audio> elements for playing the actual bowl sounds
-    var bellPlayers = [];
-    for (var a = 0; a < 4; a++) {
-        var el = document.createElement("audio");
-        el.preload = "auto";
-        el.src = "bowl.wav";
-        el.style.display = "none";
-        document.body.appendChild(el);
-        bellPlayers.push(el);
-    }
-    var nextBellIndex = 0;
-
-    function playBell() {
-        var el = bellPlayers[nextBellIndex % bellPlayers.length];
-        nextBellIndex++;
-        el.currentTime = 0;
-        el.volume = 1.0;
-        var p = el.play();
-        if (p && p.catch) { p.catch(function() {}); }
-        showDingFlash();
-    }
-
-    // Heartbeat timeupdate handler — checks if any bells are due
-    heartbeat.addEventListener("timeupdate", function() {
-        if (state !== "running") return;
-        checkBells();
-        updateUI();
-    });
-
-    function checkBells() {
-        var now = Date.now();
-        for (var i = 0; i < bellTimes.length; i++) {
-            if (!bellFired[i] && now >= bellTimes[i]) {
-                bellFired[i] = true;
-                playBell();
+            // Find the "data" chunk
+            var offset = 12; // skip RIFF header
+            while (offset < view.byteLength - 8) {
+                var chunkId = String.fromCharCode(
+                    view.getUint8(offset),
+                    view.getUint8(offset + 1),
+                    view.getUint8(offset + 2),
+                    view.getUint8(offset + 3)
+                );
+                var chunkSize = view.getUint32(offset + 4, true);
+                if (chunkId === "data") {
+                    var numSamples = chunkSize / 2; // 16-bit = 2 bytes per sample
+                    bowlSamples = new Int16Array(numSamples);
+                    for (var i = 0; i < numSamples; i++) {
+                        bowlSamples[i] = view.getInt16(offset + 8 + i * 2, true);
+                    }
+                    break;
+                }
+                offset += 8 + chunkSize;
+                if (chunkSize % 2 !== 0) offset++; // WAV chunks are word-aligned
             }
+
+            if (!bowlSamples) {
+                bowlSamples = new Int16Array(0);
+            }
+            bowlLoading = false;
+            callback(bowlSamples);
+        }).catch(function() {
+            bowlSamples = new Int16Array(0);
+            bowlLoading = false;
+            callback(bowlSamples);
+        });
+    }
+
+    /* ============================================
+       Build a WAV blob for the entire session
+       ============================================ */
+    function buildSessionWav(bowlPCM, totalSeconds, bellOffsetsSeconds) {
+        var totalSamples = totalSeconds * SAMPLE_RATE;
+        // Add a few seconds of padding after the last bell for it to ring out
+        var padSamples = Math.min(bowlPCM.length, 6 * SAMPLE_RATE);
+        var bufferLength = totalSamples + padSamples;
+
+        // Create buffer initialized to silence (zeros)
+        var buffer = new Int16Array(bufferLength);
+
+        // Mix in bowl sounds at each bell offset
+        for (var b = 0; b < bellOffsetsSeconds.length; b++) {
+            var startSample = Math.round(bellOffsetsSeconds[b] * SAMPLE_RATE);
+            for (var s = 0; s < bowlPCM.length; s++) {
+                var idx = startSample + s;
+                if (idx >= 0 && idx < bufferLength) {
+                    // Mix (clamp to Int16 range)
+                    var mixed = buffer[idx] + bowlPCM[s];
+                    if (mixed > 32767) mixed = 32767;
+                    if (mixed < -32768) mixed = -32768;
+                    buffer[idx] = mixed;
+                }
+            }
+        }
+
+        // Encode as WAV
+        var dataSize = bufferLength * 2;
+        var wavSize = 44 + dataSize;
+        var wav = new ArrayBuffer(wavSize);
+        var v = new DataView(wav);
+
+        // RIFF header
+        writeString(v, 0, "RIFF");
+        v.setUint32(4, wavSize - 8, true);
+        writeString(v, 8, "WAVE");
+
+        // fmt chunk
+        writeString(v, 12, "fmt ");
+        v.setUint32(16, 16, true);       // chunk size
+        v.setUint16(20, 1, true);        // PCM format
+        v.setUint16(22, 1, true);        // mono
+        v.setUint32(24, SAMPLE_RATE, true);
+        v.setUint32(28, SAMPLE_RATE * 2, true); // byte rate
+        v.setUint16(32, 2, true);        // block align
+        v.setUint16(34, 16, true);       // bits per sample
+
+        // data chunk
+        writeString(v, 36, "data");
+        v.setUint32(40, dataSize, true);
+
+        // Write PCM samples
+        for (var i = 0; i < bufferLength; i++) {
+            v.setInt16(44 + i * 2, buffer[i], true);
+        }
+
+        return new Blob([wav], { type: "audio/wav" });
+    }
+
+    function writeString(view, offset, str) {
+        for (var i = 0; i < str.length; i++) {
+            view.setUint8(offset + i, str.charCodeAt(i));
         }
     }
 
+    /* ============================================
+       Ding flash (visual indicator when bell plays)
+       ============================================ */
     function showDingFlash() {
         try {
             var overlay = document.querySelector(".ding-overlay");
@@ -172,49 +272,70 @@
             state = "idle";
         }
 
-        var settleSeconds   = durations.settle * 60;
-        var meditateSeconds = durations.meditate * 60;
-        var emergeSeconds   = durations.emerge * 60;
-        var totalSeconds    = settleSeconds + meditateSeconds + emergeSeconds;
-
-        var wallNow = Date.now();
-
-        // Bell times (absolute wall-clock)
-        bellTimes = [
-            wallNow,                                                    // bell 1
-            wallNow + settleSeconds * 1000,                            // bell 2
-            wallNow + (settleSeconds + meditateSeconds) * 1000,        // bell 3
-            wallNow + (settleSeconds + meditateSeconds + emergeSeconds) * 1000, // bell 4
-        ];
-        bellFired = [false, false, false, false];
-
-        // Phase timeline
-        phases = [
-            { name: "settle",   start: wallNow, end: wallNow + settleSeconds * 1000 },
-            { name: "meditate", start: wallNow + settleSeconds * 1000, end: wallNow + (settleSeconds + meditateSeconds) * 1000 },
-            { name: "emerge",   start: wallNow + (settleSeconds + meditateSeconds) * 1000, end: wallNow + totalSeconds * 1000 },
-        ];
-        sessionEndTime = wallNow + totalSeconds * 1000;
-
-        // Start the heartbeat (keeps iOS audio alive, drives our timer)
-        heartbeat.currentTime = 0;
-        var hp = heartbeat.play();
-        if (hp && hp.catch) { hp.catch(function() {}); }
-
-        // Play first bell immediately (we're in user gesture context)
-        bellFired[0] = true;
-        playBell();
-
-        // Update UI
-        state = "running";
-        currentPhase = "";
+        // Show loading state
+        statusText.textContent = "Preparing\u2026";
         playButton.classList.remove("breathing");
-        playIcon.classList.add("hidden");
-        stopIcon.classList.remove("hidden");
-        requestWakeLockAsync();
 
-        if (timerRAF) cancelAnimationFrame(timerRAF);
-        tickLoop();
+        loadBowlSamples(function(bowlPCM) {
+            if (bowlPCM.length === 0) {
+                statusText.textContent = "Audio error — please reload";
+                playButton.classList.add("breathing");
+                return;
+            }
+
+            var settleSeconds   = durations.settle * 60;
+            var meditateSeconds = durations.meditate * 60;
+            var emergeSeconds   = durations.emerge * 60;
+            var totalSeconds    = settleSeconds + meditateSeconds + emergeSeconds;
+
+            // Bell offsets in seconds from start of audio
+            bellOffsets = [
+                0,
+                settleSeconds,
+                settleSeconds + meditateSeconds,
+                totalSeconds,
+            ];
+            bellFlashed = [false, false, false, false];
+
+            // Build the full session WAV
+            var blob = buildSessionWav(bowlPCM, totalSeconds, bellOffsets);
+            var url = URL.createObjectURL(blob);
+
+            // Clean up previous blob URL
+            if (sessionAudio._blobUrl) {
+                URL.revokeObjectURL(sessionAudio._blobUrl);
+            }
+            sessionAudio._blobUrl = url;
+            sessionAudio.src = url;
+
+            // Phase timeline (wall-clock for UI)
+            var wallNow = Date.now();
+            sessionStartTime = wallNow;
+            phases = [
+                { name: "settle",   start: wallNow, end: wallNow + settleSeconds * 1000 },
+                { name: "meditate", start: wallNow + settleSeconds * 1000, end: wallNow + (settleSeconds + meditateSeconds) * 1000 },
+                { name: "emerge",   start: wallNow + (settleSeconds + meditateSeconds) * 1000, end: wallNow + totalSeconds * 1000 },
+            ];
+            sessionEndTime = wallNow + totalSeconds * 1000;
+
+            // Play the session audio (we're still in user gesture context)
+            var p = sessionAudio.play();
+            if (p && p.catch) { p.catch(function() {}); }
+
+            // Update UI
+            state = "running";
+            currentPhase = "";
+            playIcon.classList.add("hidden");
+            stopIcon.classList.remove("hidden");
+            requestWakeLockAsync();
+
+            // Flash for the first bell immediately
+            bellFlashed[0] = true;
+            showDingFlash();
+
+            if (timerRAF) cancelAnimationFrame(timerRAF);
+            tickLoop();
+        });
     }
 
     function stopSession() {
@@ -222,13 +343,11 @@
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
 
-        // Stop heartbeat
-        try { heartbeat.pause(); } catch (e) {}
-
-        // Stop any playing bells
-        for (var j = 0; j < bellPlayers.length; j++) {
-            try { bellPlayers[j].pause(); bellPlayers[j].currentTime = 0; } catch (e) {}
-        }
+        // Stop session audio
+        try {
+            sessionAudio.pause();
+            sessionAudio.currentTime = 0;
+        } catch (e) {}
 
         releaseWakeLock();
 
@@ -251,8 +370,22 @@
         var now = Date.now();
 
         if (now >= sessionEndTime) {
-            completeSession();
-            return;
+            // Wait for the last bell to finish ringing (6 seconds)
+            // before completing the session
+            var lastBellEnd = sessionEndTime + 6000;
+            if (now >= lastBellEnd) {
+                completeSession();
+                return;
+            }
+        }
+
+        // Check for ding flashes based on audio currentTime
+        var audioTime = sessionAudio.currentTime;
+        for (var b = 0; b < bellOffsets.length; b++) {
+            if (!bellFlashed[b] && audioTime >= bellOffsets[b]) {
+                bellFlashed[b] = true;
+                showDingFlash();
+            }
         }
 
         var phase = null;
@@ -261,6 +394,10 @@
                 phase = phases[i];
                 break;
             }
+        }
+        // If past all phases but before session truly ends, show last phase
+        if (!phase && now >= sessionEndTime && phases.length > 0) {
+            phase = phases[phases.length - 1];
         }
 
         if (phase) {
@@ -288,30 +425,30 @@
         }
     }
 
-    // RAF loop for smooth UI updates (timeupdate fires ~4x/sec which is choppy)
+    // RAF loop for smooth UI updates
     function tickLoop() {
         if (state !== "running") return;
-
-        var now = Date.now();
-        if (now >= sessionEndTime) {
-            completeSession();
-            return;
-        }
-
-        // Also check bells from RAF in case timeupdate is slow
-        checkBells();
         updateUI();
-
         timerRAF = requestAnimationFrame(tickLoop);
     }
+
+    // Also update on audio timeupdate (fires even when RAF is throttled)
+    sessionAudio.addEventListener("timeupdate", function() {
+        if (state === "running") {
+            updateUI();
+        }
+    });
+
+    sessionAudio.addEventListener("ended", function() {
+        if (state === "running") {
+            completeSession();
+        }
+    });
 
     function completeSession() {
         state = "complete";
         currentPhase = "";
         if (timerRAF) { cancelAnimationFrame(timerRAF); timerRAF = null; }
-
-        // Stop heartbeat
-        try { heartbeat.pause(); } catch (e) {}
 
         statusText.textContent = "Session complete";
         statusText.className = "subtitle phase-complete";
@@ -383,7 +520,10 @@
     closeSettingsBtn.addEventListener("click", closeSettingsPanel);
 
     previewSound.addEventListener("click", function() {
-        playBell();
+        previewEl.currentTime = 0;
+        var p = previewEl.play();
+        if (p && p.catch) { p.catch(function() {}); }
+        showDingFlash();
     });
 
     var durationBtns = document.querySelectorAll(".duration-btn");
@@ -400,7 +540,6 @@
     document.addEventListener("visibilitychange", function() {
         if (document.visibilityState === "visible" && state === "running") {
             requestWakeLockAsync();
-            checkBells();
             updateUI();
             if (timerRAF) cancelAnimationFrame(timerRAF);
             tickLoop();
@@ -418,6 +557,9 @@
        ============================================ */
     playButton.classList.add("breathing");
     setProgress(0);
+
+    // Pre-load bowl samples so session start is instant
+    loadBowlSamples(function() {});
 
     if ("serviceWorker" in navigator) {
         navigator.serviceWorker.register("sw.js").catch(function() {});

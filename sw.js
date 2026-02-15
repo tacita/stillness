@@ -6,7 +6,7 @@
    fresh content, fall back to cache if offline.
    ============================================ */
 
-var CACHE_NAME = "stillness-v6";
+var CACHE_NAME = "stillness-v7";
 
 // Use relative paths so this works on any subpath (e.g. /stillness/)
 var ASSETS = [
@@ -15,7 +15,6 @@ var ASSETS = [
     "./style.css",
     "./app.js",
     "./bowl.wav",
-    "./silence.wav",
     "./manifest.json",
     "./icons/icon-192.png",
     "./icons/icon-512.png",
